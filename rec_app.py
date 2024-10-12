@@ -1,37 +1,37 @@
+# Streamlit Code
+import pickle
 import time
 import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import linear_kernel, cosine_similarity
-import pickle
+from sklearn.metrics.pairwise import linear_kernel
 
 # Define the Recommender Class
 class BookRecommender:
-    def __init__(self, df_mf, book_info, book_rec, ml_train_set, gbr_model, knn_model):
+    def __init__(self, df_mf, book_info, book_rec, ml_train_set, gbr_model, svd_model):
         self.df_mf = df_mf
         self.book_info = book_info
         self.book_rec = book_rec
         self.ml_train_set = ml_train_set
         self.gbr_model = gbr_model
-        self.knn_model = knn_model
+        self.svd_model = svd_model
         self.cosine_sim = None
         self.create_cosine_matrix()
 
     def create_cosine_matrix(self):
         """ Create the cosine similarity matrix for content-based filtering """
-        tfidf = TfidfVectorizer(stop_words='english', max_features=500, min_df=10, max_df=.8)
+        tfidf = TfidfVectorizer(stop_words='english', max_features=100, min_df=10)
         tfidf_matrix = tfidf.fit_transform(self.book_rec['keywords'])
-        self.cosine_sim = cosine_similarity(tfidf_matrix, dense_output=False) 
-
+        self.cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
 
     def get_recommended_items_mf(self, user_id, top_n):
-        """ CF based recommendations """
+        """ Matrix Factorization based recommendations """
         user_reviewed_iid = self.df_mf[self.df_mf['user_id'] == user_id]['isbn']
         iid_to_est = self.df_mf[~self.df_mf['isbn'].isin(user_reviewed_iid)]['isbn'].drop_duplicates()
         testset = [(user_id, iid, None) for iid in iid_to_est]
         
-        predictions = self.knn_model.test(testset)
+        predictions = self.svd_model.test(testset)
         predictions = pd.DataFrame(predictions)[['uid', 'iid', 'est']]
         predictions.columns = ['user_id', 'isbn', 'predicted_rating']
         predictions['predicted_rank'] = predictions['predicted_rating'].rank(method='first', ascending=False)
@@ -47,20 +47,23 @@ class BookRecommender:
             return pd.DataFrame()
 
         most_liked_isbn = most_liked_isbn.values[0]
-
+        
         if most_liked_isbn not in self.book_rec['isbn'].values:
-            st.warning("유저의 최근 선호 아이템을 찾을수 없습니다.")
-            return pd.DataFrame()
+            predictions = book_info.sort_values("rating_count", ascending=False)[:top_n]
+            predictions['user_id'] = user_id
+            predictions = predictions[['user_id', 'isbn', 'book_title', 'book_author']]
+        else:
+        
+            idx = self.book_rec[self.book_rec['isbn'] == most_liked_isbn].index[0]
+            sim_scores = list(enumerate(self.cosine_sim[idx]))
+            sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:top_n+1]
+            book_indices = [i[0] for i in sim_scores]
+            recommend_books = self.book_rec.iloc[book_indices]['isbn']
+            predictions = self.book_info[self.book_info['isbn'].isin(recommend_books)]
+            predictions['user_id'] = user_id
+            predictions = predictions[['user_id', 'isbn', 'book_title', 'book_author']]
 
-        idx = self.book_rec[self.book_rec['isbn'] == most_liked_isbn].index[0]
-        sim_scores = list(enumerate(self.cosine_sim[idx]))
-        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:top_n+1]
-        book_indices = [i[0] for i in sim_scores]
-        recommend_books = self.book_rec.iloc[book_indices]['isbn']
-        predictions = self.book_info[self.book_info['isbn'].isin(recommend_books)]
-        predictions['user_id'] = user_id
-
-        return predictions[['user_id', 'isbn', 'book_title', 'book_author']]
+        return predictions
 
     def get_recommended_items_ml(self, user_id, top_n):
         """ Machine Learning (GBR) based recommendations """
@@ -87,7 +90,7 @@ class BookRecommender:
 
 with st.spinner('결과를 열심히 가져오고 있어요. 잠시만 기다려주세요.'): 
 
-    # define path
+    # Define your file paths here
     df_mf_path = 'data/df_mf.csv'
     book_info_path = 'data/book_info.csv'
     user_info_path = 'data/user_info.csv'
@@ -95,7 +98,7 @@ with st.spinner('결과를 열심히 가져오고 있어요. 잠시만 기다려
     ml_train_set_path = 'data/ml_train_set.csv'
 
     # Load data and models
-    #st.cache_data
+    @st.cache_data
     def load_data():
         df_mf = pd.read_csv(df_mf_path)
         book_info = pd.read_csv(book_info_path)
@@ -107,20 +110,20 @@ with st.spinner('결과를 열심히 가져오고 있어요. 잠시만 기다려
 
     df_mf, book_info, user_info, book_rec, ml_train_set = load_data()
 
-    #st.cache_resource
+    @st.cache_resource
     def load_models():
         with open('model/gbr_trained_model.pkl', 'rb') as file:
             gbr = pickle.load(file)
 
-        with open('model/knn_trained_model.pkl', 'rb') as file:
-            knn = pickle.load(file)
+        with open('model/svd_trained_model.pkl', 'rb') as file:
+            svd = pickle.load(file)
 
-        return gbr, knn
+        return gbr, svd
 
-    gbr_model, knn_model = load_models()
+    gbr_model, svd_model = load_models()
 
     # Initialize the Recommender System
-    book_recommender = BookRecommender(df_mf, book_info, book_rec, ml_train_set, gbr_model, knn_model)
+    book_recommender = BookRecommender(df_mf, book_info, book_rec, ml_train_set, gbr_model, svd_model)
 
     # Sidebar for user inputs
     st.sidebar.header("Input User Info.")
@@ -133,19 +136,19 @@ with st.spinner('결과를 열심히 가져오고 있어요. 잠시만 기다려
     st.markdown("이 어플리케이션은 3개의 알고리즘을 이용하여 책을 추천합니다.")
 
     # Define tabs
-    tab1, tab2, tab3 = st.tabs(["Collaborative Filtering", "Content-based", "GBR Model"])
+    tab1, tab2, tab3 = st.tabs(["Matrix Factorization", "Content-based", "GBR Model"])
 
-    # Collaborative Filtering Tab
+    # Matrix Factorization Tab
     with tab1:
-        st.markdown("**✅ Collaborative Filtering Recommendations**")
-        st.info("Collaborative Filtering 은 유사한 유저가 선호한 책을 추천하는 알고리즘입니다.")
+        st.markdown("**✅ Matrix Factorization Recommendations**")
+        st.info("Matrix Factorization 은 유저 및 책의 잠재요인을 파악하여 추천하는 알고리즘입니다.")
         mf_rec_result = book_recommender.get_recommended_items_mf(user_id, top_n)
         st.table(mf_rec_result)
 
     # Content-based Tab
     with tab2:
         st.markdown("**✅ Content-based Recommendations**")
-        st.info("유저의 최근 선호 아이템과 유사한 아이템을 추천합니다. 최근 선호 아이템이 없으면 추천이 안될수 있습니다.")
+        st.info("유저의 최근 선호 아이템과 유사한 아이템을 추천합니다.")
         content_rec_result = book_recommender.get_recommended_items_content(user_id, top_n)
         st.table(content_rec_result)
 
